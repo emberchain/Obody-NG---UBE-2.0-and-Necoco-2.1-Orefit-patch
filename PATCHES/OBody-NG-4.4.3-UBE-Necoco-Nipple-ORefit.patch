@@ -1,0 +1,71 @@
+--- a/src/Body/Body.cpp
++++ b/src/Body/Body.cpp
+@@ -710,7 +710,68 @@ namespace Body {
+             AddSliderToSet(set, DeriveSlider(a_actor, "NipplePerkManga", -0.25F));
+             // Flatten nipple
+             // AddSliderToSet(set, DeriveSlider(a_actor, "NipplePerkiness", 0.0f));
++
++        }
++
++        // UBE 2.0 and Necoco use their own RaceMenu morph names.  The generic CBBE
++        // fallback above therefore cannot correct their breast shape or nipple size.
++        //
++        // These corrections deliberately do not use setNippleSlidersRefitEnabled:
++        // that option controls the legacy CBBE group only.  Making UBE/Necoco support
++        // conditional on it left the dedicated patch silently inactive in a normal
++        // OBody setup.  The compensation includes both OBody and RaceMenu's
++        // RSMLegacy contribution while OClothe is active.
++        //
++        // A morph missing from a worn mesh TRI has no visual effect, making the list
++        // safe for non-UBE actors as well.  This deliberately covers nipple and
++        // areola sliders only; breast, chest, pectoral and Necoco_Boob sliders are
++        // body-shape controls and must remain unchanged under clothing.
++        constexpr const char* ubeRefitMorphs[]{
++            "AreolaErection",
++            "AreolaeSizeBig",
++            "AreolaeSizeBig_UV_fix",
++            "AreolaeSizeSmall",
++            "AreolaeSizeSmall_UV_fix",
++            "AreolaHorizontal",
++            "AreolaVertical",
++            "Necoco_Overall_Nipple",
++            "NEW_NippleCircularCrease_Uv_fix",
++            "NEW_NippleDiameter_neg_value_Uv_fix",
++            "NEW_Nipples_Fantasy_UV_fix",
++            "NippleCircularCrease",
++            "NippleCreaseCentral",
++            "NippleCreaseHorizontal",
++            "NippleCreaseVertical",
++            "NippleDiameter n|p",
++            "NippleDispertionSides n|p",
++            "NippleFlatten",
++            "NippleHeight n|p",
++            "NippleHorizontal n|p",
++            "Nippleinverted",
++            "NippleInverted_PuffyAreola",
++            "NippleInverted_PuffyAreola_UV_fix",
++            "NippleLength",
++            "Nipples_Fantasy",
++            "NipplesPerkiness",
++            "NipplesShowUp"};
++
++        const auto ubeNippleLength{GetMorph(a_actor, "NippleLength")};
++        const auto raceMenuNippleLength{morphInterface->GetMorph(a_actor, "NippleLength", "RSMLegacy")};
++        for (const char* morph : ubeRefitMorphs) {
++            // RaceMenu's normal body-slider UI stores its values under RSMLegacy,
++            // not OBody.  Include that contribution as well; otherwise a nipple
++            // edited in RaceMenu remains visible through clothing even though the
++            // OBody contribution is correctly zeroed.
++            const auto oBodyValue{GetMorph(a_actor, morph)};
++            const auto raceMenuValue{morphInterface->GetMorph(a_actor, morph, "RSMLegacy")};
++            AddSliderToSet(set, Slider{morph, -(oBodyValue + raceMenuValue)});
+         }
++        logger::info("[UBE-ORefit] Generated {} nipple/areola corrections for {}: OBody NippleLength={:.3f}, RSMLegacy NippleLength={:.3f}, OClothe compensation={:.3f}",
++                     std::size(ubeRefitMorphs),
++                     a_actor->GetName(),
++                     ubeNippleLength,
++                     raceMenuNippleLength,
++                     -(ubeNippleLength + raceMenuNippleLength));
+ 
+         return set;
+     }

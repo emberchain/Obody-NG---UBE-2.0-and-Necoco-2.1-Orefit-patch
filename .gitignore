@@ -1,0 +1,16 @@
+/.git
+/.idea
+/build
+/*.bat
+/meta.ini
+/*.zip
+/*.pex
+/SkyrimSE.code-workspace
+/.vscode/
+/.vs/
+/build/
+/contrib/**
+/**.log
+/.venv/
+/.env
+/.xmake/
