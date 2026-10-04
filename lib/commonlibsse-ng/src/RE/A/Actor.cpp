@@ -228,6 +228,13 @@ namespace RE
 		return func(this, a_wornItemEnchantments, a_baseSpells, a_raceSpells, a_everyActorAbility);
 	}
 
+	void Actor::ChangeHeadPart(BGSHeadPart* a_oldPart, BGSHeadPart* a_newPart)
+	{
+		using func_t = decltype(&Actor::ChangeHeadPart);
+		static REL::Relocation<func_t> func{ REL::RelocationID(26468, 27063) };
+		return func(this, a_oldPart, a_newPart);
+	}
+
 	void Actor::ClearArrested()
 	{
 		auto* _currentProcess = GetActorRuntimeData().currentProcess;
@@ -1708,7 +1715,7 @@ namespace RE
 
 	TESAmmo* Actor::GetCurrentAmmo() const
 	{
-		return RelocateVirtual<decltype(&Actor::GetCurrentAmmo)>(0x9F, 0xA0, this);
+		return RelocateVirtual<decltype(&Actor::GetCurrentAmmo)>(0x9E, 0x9F, this);
 	}
 
 	void Actor::UnequipItem(std::uint64_t a_arg1, TESBoundObject* a_object)

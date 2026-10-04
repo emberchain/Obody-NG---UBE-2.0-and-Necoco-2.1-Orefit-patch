@@ -6,6 +6,7 @@
 #include "PresetManager/PresetManager.h"
 #include "JSONParser/JSONParser.h"
 #include "Papyrus/PapyrusBody.h"
+#include "UI/UI.h"
 
 namespace PapyrusBody {
     void GenActor(RE::StaticFunctionTag*, RE::Actor* a_actor) {
@@ -29,10 +30,6 @@ namespace PapyrusBody {
 
     void SetPerformanceMode(RE::StaticFunctionTag*, const bool a_enabled) {
         Body::OBody::GetInstance().setPerformanceMode = a_enabled;
-    }
-
-    void SetRespectfulMorphApplication(RE::StaticFunctionTag*, const bool a_enabled) {
-        Body::OBody::GetInstance().setRespectfulMorphApplication = a_enabled;
     }
 
     void SetLegacyStorageUtilUsageEnabled(RE::StaticFunctionTag*, const bool a_enabled) {
@@ -130,20 +127,9 @@ namespace PapyrusBody {
     }
 
     std::string GetPresetAssignedToActor(RE::StaticFunctionTag*, RE::Actor* a_actor) {
-        auto& registry{ActorTracker::Registry::GetInstance()};
-        auto formID = a_actor->formID;
-        uint32_t actorPresetIndex = 0;
-
-        registry.stateForActor.cvisit(formID, [&](auto& entry) { actorPresetIndex = entry.second.presetIndex; });
-
-        if (actorPresetIndex != 0) {
-            // Minus one because an index of zero assigned to the actor signifies the absence of a preset.
-            auto preset =
-                PresetManager::AssignedPresetIndex{actorPresetIndex - 1}.GetPreset(Body::OBody::IsFemale(a_actor));
-
-            if (preset != nullptr) {
-                return preset->name;
-            }
+        const auto a_presetName = ActorTracker::Registry::GetInstance().GetPresetNameForActor(a_actor, Body::OBody::IsFemale(a_actor));
+        if(a_presetName) {
+            return *a_presetName;
         }
 
         return "";
@@ -245,6 +231,10 @@ namespace PapyrusBody {
         return true;
     }
 
+    void UpdatePresetMenuKey(RE::StaticFunctionTag*, int a_key) {
+        UI::PresetList::SetHotkeyScanCode(a_key);
+    }
+
     bool Bind(VM* a_vm) {
         constexpr auto obj = "OBodyNative"sv;
 
@@ -270,9 +260,9 @@ namespace PapyrusBody {
         OBODY_PAPYRUS_BIND(SetNippleRand);
         OBODY_PAPYRUS_BIND(SetGenitalRand);
         OBODY_PAPYRUS_BIND(SetPerformanceMode);
-        OBODY_PAPYRUS_BIND(SetRespectfulMorphApplication);
         OBODY_PAPYRUS_BIND(SetLegacyStorageUtilUsageEnabled);
         OBODY_PAPYRUS_BIND(SetDistributionKey);
+        OBODY_PAPYRUS_BIND(UpdatePresetMenuKey);
 #undef OBODY_PAPYRUS_BIND
         return true;
     }

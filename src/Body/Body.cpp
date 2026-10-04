@@ -3,6 +3,13 @@
 #include "JSONParser/JSONParser.h"
 #include "STL.h"
 
+#include <algorithm>
+#include <chrono>
+#include <deque>
+#include <mutex>
+#include <string_view>
+#include <thread>
+
 using namespace PresetManager;
 
 Body::OBody Body::OBody::instance_;
@@ -56,27 +63,84 @@ namespace Body {
         } else {
             // ReSharper disable CppDFAUnreadVariable
             // ReSharper disable CppDFAUnusedValue
-            auto actorName{a_actor->GetActorBase()->GetName()};
-
-            // We do this to prevent stutters due to Racemenu attempting to update morphs for too many NPCs
-            std::thread([this, actorHandle, actorName] {
-                if (RE::Actor * actor{actorHandle.get().get()}) {
-                    logger::info("Actor {} is valid, updating morphs now", actorName);
-
-                    SetMorph(actor, distributionKey.c_str(), "OBody", 1.0F);
-
-                    // ReSharper disable once CppDFAConstantConditions
-                    if (actor && actor->Is3DLoaded() &&
-                        !morphInterface->HasBodyMorph(actor, "obody_synthebd", "OBody")) {
-                        morphInterface->ApplyBodyMorphs(actor, true);
-
-                        NotifyMorphApplied(actor);
-                    }
-                } else {
-                    logger::info("Actor {} is no longer valid, not updating morphs", actorName);
-                }
-            }).detach();
+            // We do this to prevent stutters due to Racemenu attempting to update morphs for too many NPCs.
+            // Actors are queued and drained on the game thread a couple at a time. The upstream code applied
+            // morphs from one detached thread per actor, which races SKEE's MorphCache and the actor's 3D
+            // being assembled and crashed inside skee64 while loading a save in a crowded cell.
+            QueueDeferredMorphs(actorHandle);
         }
+    }
+
+    void OBody::QueueDeferredMorphs(const RE::ActorHandle a_handle) const {
+        static std::mutex queueLock;
+        static std::deque<RE::ActorHandle> queue;
+        static bool pumpRunning = false;
+
+        constexpr std::size_t actorsPerTick = 2;
+        constexpr auto tickInterval = std::chrono::milliseconds(33);
+
+        {
+            std::lock_guard lock{queueLock};
+            if (std::ranges::find(queue, a_handle) == queue.end()) {
+                queue.push_back(a_handle);
+            }
+            if (pumpRunning) {
+                return;
+            }
+            pumpRunning = true;
+        }
+
+        // This thread only sleeps and schedules; it never touches game state. The morphs themselves are applied
+        // by a task that SKSE runs on the game thread.
+        std::thread([this, tickInterval] {
+            for (;;) {
+                std::this_thread::sleep_for(tickInterval);
+
+                bool empty;
+                {
+                    std::lock_guard lock{queueLock};
+                    empty = queue.empty();
+                    if (empty) {
+                        pumpRunning = false;
+                    }
+                }
+                if (empty) {
+                    return;
+                }
+
+                SKSE::GetTaskInterface()->AddTask([this] {
+                    for (std::size_t i = 0; i < actorsPerTick; ++i) {
+                        RE::ActorHandle handle;
+                        {
+                            std::lock_guard lock{queueLock};
+                            if (queue.empty()) {
+                                return;
+                            }
+                            handle = queue.front();
+                            queue.pop_front();
+                        }
+
+                        const auto actorPtr{handle.get()};
+                        RE::Actor* actor{actorPtr.get()};
+                        if (!actor) {
+                            logger::info("Queued actor is no longer valid, not updating morphs");
+                            continue;
+                        }
+
+                        const std::string actorName{actor->GetName()};
+                        logger::info("Actor {} is valid, updating morphs now", actorName);
+
+                        SetMorph(actor, distributionKey.c_str(), "OBody", 1.0F);
+
+                        if (actor->Is3DLoaded() && !morphInterface->HasBodyMorph(actor, "obody_synthebd", "OBody")) {
+                            morphInterface->ApplyBodyMorphs(actor, true);
+
+                            NotifyMorphApplied(actor);
+                        }
+                    }
+                });
+            }
+        }).detach();
     }
 
     void OBody::ProcessActorEquipEvent(RE::Actor* a_actor, const bool a_removingArmor,
@@ -229,15 +293,21 @@ namespace Body {
 
         if (!preset.has_value()) {
             auto actorRace{stl::get_editorID(actorBase->GetRace()->As<RE::TESForm>())};
+            auto actorClass{actorBase->npcClass ? stl::get_editorID(actorBase->npcClass->As<RE::TESForm>()) : std::string{}};
 
             // if we can't find it, we check if the NPC is blacklisted by plugin name or by race
-            if (jsonParser.IsNPCBlacklistedGlobally(a_actor, actorRace.c_str(), female)) {
+            if (jsonParser.IsNPCBlacklistedGlobally(a_actor, actorRace.c_str(), actorClass.c_str(), female)) {
                 blacklistNPC();
                 return;
             }
 
             // Next up, we check if we have a preset defined in one of the NPC's factions
             preset = jsonParser.GetNPCFactionPreset(actorBase, female);
+
+            // If that also fails, we check if we have a preset in the NPC's class
+            if (!preset.has_value() && !actorClass.empty()) {
+                preset = jsonParser.GetNPCClassPreset(actorClass.c_str(), female);
+            }
 
             // If that also fails, we check if we have a preset in the NPC's plugin
             if (!preset.has_value()) {
@@ -292,15 +362,9 @@ namespace Body {
         registry.stateForActor.emplace_or_visit(formID, fallbackActorState,
                                                 [&](auto& entry) { entry.second.presetIndex = actorPresetIndex; });
 
-        // Start by clearing any previous OBody morphs
-        if (setRespectfulMorphApplication) {
-            morphInterface->ClearBodyMorphKeys(a_actor, "OBody");
-            morphInterface->ClearBodyMorphKeys(a_actor, "OClothe");
-        } else {
-            // For backwards compatibility we clear all morphs instead of just our own,
-            // unless the user has opted-in for us to be more respectful.
-            morphInterface->ClearMorphs(a_actor);
-        }
+
+        morphInterface->ClearBodyMorphKeys(a_actor, "OBody");
+        morphInterface->ClearBodyMorphKeys(a_actor, "OClothe");
 
         // Apply the preset's sliders
         ApplySliderSet(a_actor, a_preset.sliders, "OBody");
@@ -375,8 +439,42 @@ namespace Body {
     }
 
     void OBody::ApplyClothePreset(RE::Actor* a_actor) const {
-        auto set{GenerateClotheSliders(a_actor)};
-        ApplySliderSet(a_actor, set, "OClothe");
+        const auto& presetContainer{PresetContainer::GetInstance()};
+
+        bool isFemale = IsFemale(a_actor);
+
+        std::optional<Preset> a_preset = std::nullopt;
+
+        auto& jsonParser{Parser::JSONParser::GetInstance()};
+        a_preset = jsonParser.GetRefitPresetFromEquippedItems(a_actor, isFemale);
+
+        if (a_preset) {
+            ApplySliderSet(a_actor, a_preset->sliders, "OClothe");
+            return;
+        }
+
+        const auto a_presetName = ActorTracker::Registry::GetInstance().GetPresetNameForActor(a_actor, isFemale);
+        if (a_presetName) {
+            const std::string refitPresetName = *a_presetName + "-Refit";
+            a_preset = GetPresetByNameForRandom(presetContainer.allFemalePresets, refitPresetName);
+        }
+        
+        if (!a_preset) {
+            if (isFemale) {
+                a_preset = GetPresetByNameForRandom(presetContainer.allFemalePresets, "Female-Refit");
+            }
+            else {
+                a_preset = GetPresetByNameForRandom(presetContainer.allMalePresets, "Male-Refit");
+            }
+        }
+
+        if (a_preset) {
+            ApplySliderSet(a_actor, a_preset->sliders, "OClothe");
+        }
+        else {
+            auto set{GenerateClotheSliders(a_actor)};
+            ApplySliderSet(a_actor, set, "OClothe");
+        }
     }
 
     void OBody::ClearActorMorphs(RE::Actor* a_actor, bool updateMorphsWithoutTimer,
@@ -400,20 +498,11 @@ namespace Body {
     }
 
     void OBody::ReapplyActorMorphs(RE::Actor* a_actor, ::OBody::API::IPluginInterface* responsibleInterface) const {
-        auto& registry{ActorTracker::Registry::GetInstance()};
-        auto formID = a_actor->formID;
-        uint32_t actorPresetIndex = 0;
+        std::optional<PresetManager::Preset> preset = ActorTracker::Registry::GetInstance().GetPresetForActor(a_actor, IsFemale(a_actor));
 
-        registry.stateForActor.cvisit(formID, [&](auto& entry) { actorPresetIndex = entry.second.presetIndex; });
-
-        if (actorPresetIndex != 0) {
-            // Minus one because an index of zero assigned to the actor signifies the absence of a preset.
-            auto preset = PresetManager::AssignedPresetIndex{actorPresetIndex - 1}.GetPreset(IsFemale(a_actor));
-
-            if (preset != nullptr) {
-                GenerateBodyByPreset(a_actor, *preset, true, responsibleInterface);
-                return;
-            }
+        if (preset) {
+            GenerateBodyByPreset(a_actor, *preset, true, responsibleInterface);
+            return;
         }
 
         // No preset is assigned to the actor, we fallback to GenerateActorBody.
@@ -755,23 +844,31 @@ namespace Body {
             "NipplesPerkiness",
             "NipplesShowUp"};
 
-        const auto ubeNippleLength{GetMorph(a_actor, "NippleLength")};
-        const auto raceMenuNippleLength{morphInterface->GetMorph(a_actor, "NippleLength", "RSMLegacy")};
+        // RaceMenu stores slider values under whatever key the writer used: the
+        // generic body-slider UI uses RSMLegacy, but UBE's RaceMenu morph plugin
+        // stores them under its own plugin name ("UBE_RaceMenuMorphs.esp").  Sum
+        // every key except OClothe itself, so any source is cancelled.
+        struct KeySumVisitor final : SKEE::IBodyMorphInterface::MorphKeyVisitor {
+            float total{0.0F};
+            void Visit(const char* a_key, const float a_value) override {
+                if (a_key && std::string_view{a_key} != "OClothe") total += a_value;
+            }
+        };
+        const auto sumOverKeys{[&](const char* a_morph) {
+            KeySumVisitor visitor;
+            morphInterface->VisitKeys(a_actor, a_morph, visitor);
+            return visitor.total;
+        }};
+
         for (const char* morph : ubeRefitMorphs) {
-            // RaceMenu's normal body-slider UI stores its values under RSMLegacy,
-            // not OBody.  Include that contribution as well; otherwise a nipple
-            // edited in RaceMenu remains visible through clothing even though the
-            // OBody contribution is correctly zeroed.
-            const auto oBodyValue{GetMorph(a_actor, morph)};
-            const auto raceMenuValue{morphInterface->GetMorph(a_actor, morph, "RSMLegacy")};
-            AddSliderToSet(set, Slider{morph, -(oBodyValue + raceMenuValue)});
+            AddSliderToSet(set, Slider{morph, -sumOverKeys(morph)});
         }
-        logger::info("[UBE-ORefit] Generated {} nipple/areola corrections for {}: OBody NippleLength={:.3f}, RSMLegacy NippleLength={:.3f}, OClothe compensation={:.3f}",
+        const auto nippleLengthTotal{sumOverKeys("NippleLength")};
+        logger::info("[UBE-ORefit] Generated {} nipple/areola corrections for {}: NippleLength(all keys except OClothe)={:.3f}, OClothe compensation={:.3f}",
                      std::size(ubeRefitMorphs),
                      a_actor->GetName(),
-                     ubeNippleLength,
-                     raceMenuNippleLength,
-                     -(ubeNippleLength + raceMenuNippleLength));
+                     nippleLengthTotal,
+                     -nippleLengthTotal);
 
         return set;
     }
@@ -861,6 +958,100 @@ namespace Body {
 
         return std::find(actorChangeEventListeners.begin(), actorChangeEventListeners.end(), &eventListener) !=
                actorChangeEventListeners.end();
+    }
+
+    void OBody::AssignPresetToActor(RE::Actor* a_actor, const std::string& a_presetName,
+                             bool a_forceImmediateApplicationOfMorphs, bool a_doNotApplyMorphs) const {
+        const auto& obody{Body::OBody::GetInstance()};
+        auto& registry{ActorTracker::Registry::GetInstance()};
+        auto formID = a_actor->formID;
+
+        if (a_presetName.size() == 0) {
+            // Clear their preset assignment, if they have one.
+            uint32_t previousPresetIndex = 0;
+            registry.stateForActor.visit(formID, [&](auto& entry) {
+                previousPresetIndex = entry.second.presetIndex;
+                entry.second.presetIndex = 0;
+            });
+
+            if (!a_doNotApplyMorphs) {
+                obody.ClearActorMorphs(a_actor, a_forceImmediateApplicationOfMorphs,
+                                       &obody.specialPapyrusPluginInterface);
+            }
+
+            if (previousPresetIndex != 0) {
+                obody.SendActorChangeEvent(
+                    a_actor,
+                    [&] {
+                        using Event = ::OBody::API::IActorChangeEventListener;
+
+                        Event::OnActorPresetChangedWithoutGeneration::Payload payload{
+                            &obody.specialPapyrusPluginInterface,
+                            // Note that the plugin-API mandates that this be a null-terminated string.
+                            // Minus one because an index of zero assigned to the actor signifies the absence of a
+                            // preset.
+                            PresetManager::AssignedPresetIndex{previousPresetIndex - 1}.GetPresetNameView(
+                                obody.IsFemale(a_actor))};
+
+                        auto flags = Event::OnActorPresetChangedWithoutGeneration::Flags::PresetWasUnassigned;
+
+                        return std::make_pair(flags, payload);
+                    },
+                    [](auto listener, auto actor, auto&& args) {
+                        listener->OnActorPresetChangedWithoutGeneration(actor, args.first, args.second);
+                    });
+            }
+
+            return;
+        }
+
+        bool isFemale = Body::OBody::IsFemale(a_actor);
+
+        const auto& presetContainer{PresetManager::PresetContainer::GetInstance()};
+        auto preset = GetPresetByNameForRandom(
+            isFemale ? presetContainer.allFemalePresets : presetContainer.allMalePresets, a_presetName);
+
+        if (!preset) {
+            return;
+        }
+
+        // Like OBody::GenerateBodyByName, we set this morph to prevent a crash with SynthEBD/Synthesis.
+        if (obody.synthesisInstalled) {
+            obody.SetMorph(a_actor, "obody_synthebd", "OBody", 1.0F);
+        }
+
+        if (!a_doNotApplyMorphs) {
+            obody.GenerateBodyByPreset(a_actor, *preset, a_forceImmediateApplicationOfMorphs,
+                                       &obody.specialPapyrusPluginInterface);
+        } else {
+            // Assign the preset to the actor.
+            auto assignedPresetIndex = preset->assignedIndex;
+            // Plus one because an index of zero on the actor signifies the absence of a preset.
+            uint32_t actorPresetIndex = assignedPresetIndex.value + 1;
+            ActorTracker::ActorState fallbackActorState{};
+            fallbackActorState.presetIndex = actorPresetIndex;
+
+            registry.stateForActor.emplace_or_visit(formID, fallbackActorState,
+                                                    [&](auto& entry) { entry.second.presetIndex = actorPresetIndex; });
+
+            obody.SendActorChangeEvent(
+                a_actor,
+                [&] {
+                    using Event = ::OBody::API::IActorChangeEventListener;
+
+                    Event::OnActorPresetChangedWithoutGeneration::Payload payload{
+                        &obody.specialPapyrusPluginInterface,
+                        // Note that the plugin-API mandates that this be a null-terminated string.
+                        assignedPresetIndex.GetPresetNameView(isFemale)};
+
+                    Event::OnActorPresetChangedWithoutGeneration::Flags flags{};
+
+                    return std::make_pair(flags, payload);
+                },
+                [](auto listener, auto actor, auto&& args) {
+                    listener->OnActorPresetChangedWithoutGeneration(actor, args.first, args.second);
+                });
+        }
     }
 
 }  // namespace Body

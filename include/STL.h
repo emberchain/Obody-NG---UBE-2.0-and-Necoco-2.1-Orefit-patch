@@ -141,6 +141,11 @@ namespace stl {
     }
 
 
+    void MergeJsonDocument(rapidjson::Value& target, rapidjson::Value& source,
+                           rapidjson::Document::AllocatorType& allocator);
+    void MergeJsonArray(rapidjson::Value& target, rapidjson::Value& source,
+                     rapidjson::Document::AllocatorType& allocator);
+
     class FilePtrManager {
     public:
         explicit FilePtrManager(const char* path, const char* mode = "rb") noexcept;

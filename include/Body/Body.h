@@ -26,6 +26,7 @@ namespace Body {
         float GetMorph(RE::Actor* a_actor, const char* a_morphName) const;
         void NotifyMorphApplied(RE::Actor* actor) const;
         void ApplyMorphs(RE::Actor* a_actor, bool updateMorphsWithoutTimer, bool applyProcessedMorph = true) const;
+        void QueueDeferredMorphs(RE::ActorHandle a_handle) const;
 
         void ProcessActorEquipEvent(RE::Actor* a_actor, bool a_removingArmor, const RE::TESForm* a_equippedArmor) const;
 
@@ -74,6 +75,9 @@ namespace Body {
         bool DetachEventListener(::OBody::API::IActorChangeEventListener& eventListener);
         bool IsEventListenerAttached(::OBody::API::IActorChangeEventListener& eventListener);
 
+        void AssignPresetToActor(RE::Actor* a_actor, const std::string& a_presetName,
+                             bool a_forceImmediateApplicationOfMorphs, bool a_doNotApplyMorphs) const;
+
         template <typename PrepareArguments, typename EventMethod>
         __forceinline void SendActorChangeEvent(RE::Actor* a_actor, PrepareArguments&& prepareArguments,
                                                 EventMethod&& eventMethod) const {
@@ -118,9 +122,8 @@ namespace Body {
         bool setNippleSlidersRefitEnabled = true;
         bool setNippleRand = true;
         bool setGenitalRand = true;
-        bool setPerformanceMode = true;
-        bool setRespectfulMorphApplication = false;
-        bool setLegacyStorageUtilUsageEnabled = true;
+        bool setPerformanceMode = false;
+        bool setLegacyStorageUtilUsageEnabled = false;
 
         std::string distributionKey;
 

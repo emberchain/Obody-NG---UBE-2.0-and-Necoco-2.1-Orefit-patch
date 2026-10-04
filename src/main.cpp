@@ -7,6 +7,8 @@
 #include "SaveFileState/SaveFileState.h"
 #include "SKEE.h"
 #include "STL.h"
+#include "UI/UI.h"
+#include "UI/Translations.h"
 
 namespace {
     void InitializeLogging() {
@@ -152,6 +154,9 @@ namespace {
                 obody.synthesisInstalled = pDataHandler->LookupModByName("SynthEBD.esp") != nullptr;
 
                 logger::info("Synthesis installed value is {}.", obody.synthesisInstalled);
+
+                UI::Register();
+                UI::Translations::Init();
 
                 return;
             }
@@ -310,6 +315,79 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse) {
             "Please Check the Obody.log. Seems like there is an error when validating the config using the json schema");
     }
     logger::info("Validated Data/SKSE/Plugins/OBody_presetDistributionConfig.json successfully");
+
+    // Load and merge include files from the includes directory
+    constexpr auto includesDir = "Data/SKSE/Plugins/OBody/obody_includes";
+    if (fs::exists(includesDir) && fs::is_directory(includesDir)) {
+        std::vector<fs::directory_entry> includeFiles;
+        for (const auto& entry : fs::directory_iterator(includesDir)) {
+            if (entry.is_regular_file() && entry.path().extension() == ".json") {
+                includeFiles.push_back(entry);
+            }
+        }
+        std::ranges::sort(includeFiles, {}, [](const fs::directory_entry& e) {
+            return e.path().filename().string();
+        });
+
+        const auto total = includeFiles.size();
+        for (size_t i = 0; i < total; ++i) {
+            const auto pathStr = includeFiles[i].path().string();
+            logger::info("Loading include file [{}/{}]: {}", i + 1, total, pathStr);
+
+            stl::FilePtrManager includeFile(pathStr.c_str());
+            if (includeFile.error() != 0) {
+                SKSE::stl::report_and_fail(
+                    std::format("Failed to open include file: {}", pathStr));
+            }
+
+            char includeBuf[65535];
+            rapidjson::FileReadStream includeBis(includeFile.get(), includeBuf, std::size(includeBuf));
+            rapidjson::AutoUTFInputStream<unsigned, rapidjson::FileReadStream> includeEis(includeBis);
+
+            rapidjson::Document includeDoc;
+            if (includeDoc.ParseStream<0, rapidjson::AutoUTF<unsigned>>(includeEis).HasParseError()) {
+                logger::error("Include file parse error (offset {}): {}", includeDoc.GetErrorOffset(),
+                              rapidjson::GetParseError_En(includeDoc.GetParseError()));
+                SKSE::stl::report_and_fail(
+                    std::format("Parse error in include file: {}", pathStr));
+            }
+
+            if (!includeDoc.IsObject()) {
+                SKSE::stl::report_and_fail(
+                    std::format("Include file is not a JSON object: {}", pathStr));
+            }
+
+            auto& allocator = parser.presetDistributionConfig.GetAllocator();
+            for (auto srcIt = includeDoc.MemberBegin(); srcIt != includeDoc.MemberEnd(); ++srcIt) {
+                const std::string_view key{srcIt->name.GetString(), srcIt->name.GetStringLength()};
+
+                if (!srcIt->value.IsArray() && !srcIt->value.IsObject()) {
+                    logger::warn("Include file {}: ignoring unsupported key '{}' (only array/object keys can be set via includes)",
+                                pathStr, key);
+                    continue;
+                }
+
+                auto dstIt = parser.presetDistributionConfig.FindMember(srcIt->name);
+                if (dstIt == parser.presetDistributionConfig.MemberEnd()) {
+                    rapidjson::Value k;
+                    k.CopyFrom(srcIt->name, allocator);
+                    rapidjson::Value v;
+                    v.CopyFrom(srcIt->value, allocator);
+                    parser.presetDistributionConfig.AddMember(k, v, allocator);
+                } else if (srcIt->value.IsArray() && dstIt->value.IsArray()) {
+                    stl::MergeJsonArray(dstIt->value, srcIt->value, allocator);
+                } else if (srcIt->value.IsObject() && dstIt->value.IsObject()) {
+                    // Merge object keys additively (last-loaded-wins for conflicts)
+                    stl::MergeJsonDocument(dstIt->value, srcIt->value, allocator);
+                } else {
+                    logger::warn("Include file {}: ignoring key '{}' (type mismatch with main config)", pathStr, key);
+                }
+            }
+            logger::info("Merged include file: {}", pathStr);
+        }
+        logger::info("Loaded {} include file(s) from {}", total, includesDir);
+    }
+
     logger::info("{} has finished loading.", plugin->GetName());
 
     return true;
